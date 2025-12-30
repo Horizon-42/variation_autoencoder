@@ -18,6 +18,7 @@ class BetaVAE(BaseVAE):
                  max_capacity: int = 25,
                  Capacity_max_iter: int = 1e5,
                  loss_type:str = 'B',
+                 image_size: int = 64,
                  **kwargs) -> None:
         super(BetaVAE, self).__init__()
 
@@ -33,25 +34,38 @@ class BetaVAE(BaseVAE):
             hidden_dims = [32, 64, 128, 256, 512]
 
         # Build Encoder
+        cur_in_channels = in_channels
         for h_dim in hidden_dims:
             modules.append(
                 nn.Sequential(
-                    nn.Conv2d(in_channels, out_channels=h_dim,
+                    nn.Conv2d(cur_in_channels, out_channels=h_dim,
                               kernel_size= 3, stride= 2, padding  = 1),
                     nn.BatchNorm2d(h_dim),
                     nn.LeakyReLU())
             )
-            in_channels = h_dim
+            cur_in_channels = h_dim
 
         self.encoder = nn.Sequential(*modules)
-        self.fc_mu = nn.Linear(hidden_dims[-1]*4, latent_dim)
-        self.fc_var = nn.Linear(hidden_dims[-1]*4, latent_dim)
+
+        # get flat_size and encoder_output_shape
+        input_height, input_width = image_size
+        self.eval()
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, in_channels, input_height, input_width)
+            encoder_output = self.encoder(dummy_input)
+            # Get the flat size automatically (e.g., 512 * 2 * 2 = 2048)
+            self.flat_size = encoder_output.view(1, -1).size(1) 
+            # Use encoder_output.shape[1:] to save the spatial dims (512, 2, 2) for the decoder
+            self.encoder_output_shape = encoder_output.shape[1:]
+
+        self.fc_mu = nn.Linear(self.flat_size, latent_dim)
+        self.fc_var = nn.Linear(self.flat_size, latent_dim)
 
 
         # Build Decoder
         modules = []
 
-        self.decoder_input = nn.Linear(latent_dim, hidden_dims[-1] * 4)
+        self.decoder_input = nn.Linear(latent_dim, self.flat_size)
 
         hidden_dims.reverse()
 
@@ -104,7 +118,7 @@ class BetaVAE(BaseVAE):
 
     def decode(self, z: Tensor) -> Tensor:
         result = self.decoder_input(z)
-        result = result.view(-1, 512, 2, 2)
+        result = result.view(-1, *self.encoder_output_shape)
         result = self.decoder(result)
         result = self.final_layer(result)
         return result
@@ -129,7 +143,8 @@ class BetaVAE(BaseVAE):
     def loss_function(self,
                       *args,
                       **kwargs) -> dict:
-        self.num_iter += 1
+        if kwargs["is_val"]==False:
+            self.num_iter += 1
         recons = args[0]
         input = args[1]
         mu = args[2]
@@ -149,7 +164,7 @@ class BetaVAE(BaseVAE):
         else:
             raise ValueError('Undefined loss type.')
 
-        return {'loss': loss, 'Reconstruction_Loss':recons_loss, 'KLD':kld_loss}
+        return {'loss': loss, 'Reconstruction_Loss':recons_loss, 'KLD_Loss':kld_loss}
 
     def sample(self,
                num_samples:int,

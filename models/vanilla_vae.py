@@ -38,6 +38,7 @@ class VanillaVAE(BaseVAE):
         self.encoder = nn.Sequential(*modules)
 
         input_height, input_width = image_size
+        self.eval()
         with torch.no_grad():
             dummy_input = torch.zeros(1, in_channels, input_height, input_width)
             encoder_output = self.encoder(dummy_input)
