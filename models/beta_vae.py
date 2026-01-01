@@ -4,31 +4,48 @@ from torch import nn
 from torch.nn import functional as F
 from .types_ import *
 from lpips import LPIPS
+from .resize_conv2d import ResizeConv2d
+
+
+def tv_loss(img: Tensor) -> torch.Tensor:
+    """
+    计算图像的平滑度，惩罚高频噪点
+    """
+    w_variance = torch.sum(torch.pow(img[:, :, :, :-1] - img[:, :, :, 1:], 2))
+    h_variance = torch.sum(torch.pow(img[:, :, :-1, :] - img[:, :, 1:, :], 2))
+    return (w_variance + h_variance) / (img.size(0) * img.size(1) * img.size(2))
+
 
 class BetaVAE(BaseVAE):
 
-    num_iter = 0 # Global static variable to keep track of iterations
+    num_iter = 0  # Global static variable to keep track of iterations
 
     def __init__(self,
                  in_channels: int,
                  latent_dim: int,
                  hidden_dims: List = None,
                  beta: int = 4,
-                 gamma:float = 1000.,
+                 gamma: float = 1000.,
                  max_capacity: int = 25,
                  Capacity_max_iter: int = 1e5,
-                 loss_type:str = 'B',
+                 loss_type: str = 'B',
                  image_size: int = 64,
+                 enable_perceptual_loss: bool = True,
+                 lpips_weight: float = 0.5,
+                 tvl_weight: float = 1e-3,
                  **kwargs) -> None:
         super(BetaVAE, self).__init__()
 
+        self.enable_perceptual_loss = enable_perceptual_loss
         # lpips model for perceptual loss
-        self.lpips_model = LPIPS(net='alex', verbose=False).eval()
+        # self.lpips_model = LPIPS(net='alex', verbose=False).eval()
+        self.lpips_model = LPIPS(net='vgg', verbose=False).eval()
         # set requires_grad to False
         for param in self.lpips_model.parameters():
             param.requires_grad = False
         # lpips loss weight, intial 0.1 to 0.5
-        self.lpips_weight = 1
+        self.lpips_weight = lpips_weight
+        self.tvl_weight = tvl_weight
 
         self.latent_dim = latent_dim
         self.beta = beta
@@ -47,7 +64,8 @@ class BetaVAE(BaseVAE):
             modules.append(
                 nn.Sequential(
                     nn.Conv2d(cur_in_channels, out_channels=h_dim,
-                              kernel_size= 3, stride= 2, padding  = 1),
+                              kernel_size=3, stride=2, padding=1,
+                              padding_mode="reflect"),
                     nn.BatchNorm2d(h_dim),
                     nn.LeakyReLU())
             )
@@ -59,16 +77,16 @@ class BetaVAE(BaseVAE):
         input_height, input_width = image_size
         self.eval()
         with torch.no_grad():
-            dummy_input = torch.zeros(1, in_channels, input_height, input_width)
+            dummy_input = torch.zeros(
+                1, in_channels, input_height, input_width)
             encoder_output = self.encoder(dummy_input)
             # Get the flat size automatically (e.g., 512 * 2 * 2 = 2048)
-            self.flat_size = encoder_output.view(1, -1).size(1) 
+            self.flat_size = encoder_output.view(1, -1).size(1)
             # Use encoder_output.shape[1:] to save the spatial dims (512, 2, 2) for the decoder
             self.encoder_output_shape = encoder_output.shape[1:]
 
         self.fc_mu = nn.Linear(self.flat_size, latent_dim)
         self.fc_var = nn.Linear(self.flat_size, latent_dim)
-
 
         # Build Decoder
         modules = []
@@ -81,31 +99,31 @@ class BetaVAE(BaseVAE):
             modules.append(
                 nn.Sequential(
                     nn.ConvTranspose2d(hidden_dims[i],
-                                       hidden_dims[i + 1],
-                                       kernel_size=3,
-                                       stride = 2,
-                                       padding=1,
-                                       output_padding=1),
+                    # ResizeConv2d(hidden_dims[i],
+                                 hidden_dims[i + 1],
+                                 kernel_size=3,
+                                 stride=2,
+                                 padding=1,
+                                 output_padding=1),
                     nn.BatchNorm2d(hidden_dims[i + 1]),
                     nn.LeakyReLU())
             )
 
-
-
         self.decoder = nn.Sequential(*modules)
 
         self.final_layer = nn.Sequential(
-                            nn.ConvTranspose2d(hidden_dims[-1],
-                                               hidden_dims[-1],
-                                               kernel_size=3,
-                                               stride=2,
-                                               padding=1,
-                                               output_padding=1),
-                            nn.BatchNorm2d(hidden_dims[-1]),
-                            nn.LeakyReLU(),
-                            nn.Conv2d(hidden_dims[-1], out_channels= 3,
-                                      kernel_size= 3, padding= 1),
-                            nn.Tanh())
+            nn.ConvTranspose2d(hidden_dims[-1],
+            # ResizeConv2d(hidden_dims[-1],
+                         hidden_dims[-1],
+                         kernel_size=3,
+                         stride=2,
+                         padding=1,
+                         output_padding=1),
+            nn.BatchNorm2d(hidden_dims[-1]),
+            nn.LeakyReLU(),
+            nn.Conv2d(hidden_dims[-1], out_channels=3,
+                      kernel_size=3, padding=1),
+            nn.Tanh())
 
     def encode(self, input: Tensor) -> List[Tensor]:
         """
@@ -146,50 +164,57 @@ class BetaVAE(BaseVAE):
     def forward(self, input: Tensor, **kwargs) -> Tensor:
         mu, log_var = self.encode(input)
         z = self.reparameterize(mu, log_var)
-        return  [self.decode(z), input, mu, log_var]
+        return [self.decode(z), input, mu, log_var]
 
     def loss_function(self,
                       *args,
                       **kwargs) -> dict:
-        if kwargs["is_val"]==False:
+        if kwargs["is_val"] == False:
             self.num_iter += 1
         recons = args[0]
         input = args[1]
         mu = args[2]
         log_var = args[3]
-        kld_weight = kwargs['M_N']  # Account for the minibatch samples from the dataset
+        # Account for the minibatch samples from the dataset
+        kld_weight = kwargs['M_N']
 
-        mse_loss =F.mse_loss(recons, input)
+        mse_loss = F.mse_loss(recons, input)
 
-        # 计算感知损失
-        # 确保 self.lpips_model 和 input 在同一个 device 上
-        if self.lpips_model.parameters().__next__().device != input.device:
-            self.lpips_model = self.lpips_model.to(input.device)
+        # Total Variation (TV) Loss, Penalize high-frequency noise
+        tvl = tv_loss(recons)
+        mse_loss += self.tvl_weight * tvl  # TV loss weight can be adjusted
         
-        perceptual_loss = self.lpips_model(recons, input)
-        # pikle the recons input if perceptual_loss is negative
-        perceptual_loss = perceptual_loss.mean() # LPIPS 返回的是 [Batch, 1, 1, 1]，需要取平均
-
+        recons_loss = mse_loss
         
-        kld_loss = torch.mean(-0.5 * torch.sum(1 + log_var - mu ** 2 - log_var.exp(), dim = 1), dim = 0)
+        if self.enable_perceptual_loss:
+            # 计算感知损失
+            # 确保 self.lpips_model 和 input 在同一个 device 上
+            if self.lpips_model.parameters().__next__().device != input.device:
+                self.lpips_model = self.lpips_model.to(input.device)
 
-        recons_loss = mse_loss + self.lpips_weight * perceptual_loss
+            perceptual_loss = self.lpips_model(recons, input)
+            # pikle the recons input if perceptual_loss is negative
+            # LPIPS 返回的是 [Batch, 1, 1, 1]，需要取平均
+            perceptual_loss = perceptual_loss.mean()
+            recons_loss += self.lpips_weight * perceptual_loss
 
-        if self.loss_type == 'H': # https://openreview.net/forum?id=Sy2fzU9gl
-            loss = recons_loss  + self.beta * kld_weight * kld_loss
-        elif self.loss_type == 'B': # https://arxiv.org/pdf/1804.03599.pdf
+        kld_loss = torch.mean(-0.5 * torch.sum(1 +
+                              log_var - mu ** 2 - log_var.exp(), dim=1), dim=0)
+
+        if self.loss_type == 'H':  # https://openreview.net/forum?id=Sy2fzU9gl
+            loss = recons_loss + self.beta * kld_weight * kld_loss
+        elif self.loss_type == 'B':  # https://arxiv.org/pdf/1804.03599.pdf
             self.C_max = self.C_max.to(input.device)
-            C = torch.clamp(self.C_max/self.C_stop_iter * self.num_iter, 0, self.C_max.data[0])
-            loss = recons_loss + self.gamma * kld_weight* (kld_loss - C).abs()
+            C = torch.clamp(self.C_max/self.C_stop_iter *
+                            self.num_iter, 0, self.C_max.data[0])
+            loss = recons_loss + self.gamma * kld_weight * (kld_loss - C).abs()
         else:
             raise ValueError('Undefined loss type.')
 
-        # return {'loss': loss, 'Reconstruction_Loss':recons_loss, 'KLD_Loss':kld_loss}
-        return {'loss': loss, 'Reconstruction_Loss':self.lpips_weight*perceptual_loss, 'KLD_Loss':kld_loss}
-        
+        return {'loss': loss, 'Reconstruction_Loss':recons_loss, 'KLD_Loss':kld_loss}
 
     def sample(self,
-               num_samples:int,
+               num_samples: int,
                current_device: int, **kwargs) -> Tensor:
         """
         Samples from the latent space and return the corresponding
