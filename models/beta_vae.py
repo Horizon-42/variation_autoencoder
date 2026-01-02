@@ -5,7 +5,7 @@ from torch.nn import functional as F
 from .types_ import *
 from lpips import LPIPS
 from .resize_conv2d import ResizeConv2d
-
+from.PID import PIDControl
 
 def tv_loss(img: Tensor) -> torch.Tensor:
     """
@@ -27,6 +27,7 @@ class BetaVAE(BaseVAE):
                  beta: int = 4,
                  gamma: float = 1000.,
                  max_capacity: int = 25,
+                 exp_kld_loss: int = 25,
                  Capacity_max_iter: int = 1e5,
                  loss_type: str = 'B',
                  image_size: int = 64,
@@ -34,6 +35,37 @@ class BetaVAE(BaseVAE):
                  lpips_weight: float = 0.5,
                  tvl_weight: float = 1e-3,
                  **kwargs) -> None:
+        """
+        Docstring for __init__
+        
+        :param self: Description
+        :param in_channels: Input channels
+        :type in_channels: int
+        :param latent_dim: Description
+        :type latent_dim: int
+        :param hidden_dims: Description
+        :type hidden_dims: List
+        :param beta: Description
+        :type beta: int
+        :param gamma: Description
+        :type gamma: float
+        :param max_capacity: Description
+        :type max_capacity: int
+        :param exp_kld_loss: Expected KL Divergence loss for PID controller
+        :param Capacity_max_iter: Description
+        :type Capacity_max_iter: int
+        :param loss_type: Description
+        :type loss_type: str, choices=['H', 'B', 'PID]
+        :param image_size: Description
+        :type image_size: int
+        :param enable_perceptual_loss: Description
+        :type enable_perceptual_loss: bool
+        :param lpips_weight: Description
+        :type lpips_weight: float
+        :param tvl_weight: Description
+        :type tvl_weight: float
+        :param kwargs: Description
+        """
         super(BetaVAE, self).__init__()
 
         self.enable_perceptual_loss = enable_perceptual_loss
@@ -53,6 +85,10 @@ class BetaVAE(BaseVAE):
         self.loss_type = loss_type
         self.C_max = torch.Tensor([max_capacity])
         self.C_stop_iter = Capacity_max_iter
+
+        # for PID controller
+        self.exp_kld_loss = exp_kld_loss
+        self.pid_controller = PIDControl()
 
         modules = []
         if hidden_dims is None:
@@ -179,14 +215,14 @@ class BetaVAE(BaseVAE):
         kld_weight = kwargs['M_N']
 
         mse_loss = F.mse_loss(recons, input)
-
-        # Total Variation (TV) Loss, Penalize high-frequency noise
-        tvl = tv_loss(recons)
-        mse_loss += self.tvl_weight * tvl  # TV loss weight can be adjusted
         
         recons_loss = mse_loss
         
         if self.enable_perceptual_loss:
+            # Total Variation (TV) Loss, Penalize high-frequency noise
+            tvl = tv_loss(recons)
+            recons_loss += self.tvl_weight * tvl  # TV loss weight can be adjusted
+
             # 计算感知损失
             # 确保 self.lpips_model 和 input 在同一个 device 上
             if self.lpips_model.parameters().__next__().device != input.device:
@@ -208,6 +244,9 @@ class BetaVAE(BaseVAE):
             C = torch.clamp(self.C_max/self.C_stop_iter *
                             self.num_iter, 0, self.C_max.data[0])
             loss = recons_loss + self.gamma * kld_weight * (kld_loss - C).abs()
+        elif self.loss_type == 'PID':  # PID controller for beta-VAE
+            beta, _ = self.pid_controller.pid(self.exp_kld_loss, kld_loss.item())
+            loss = recons_loss + beta * kld_weight * kld_loss
         else:
             raise ValueError('Undefined loss type.')
 
