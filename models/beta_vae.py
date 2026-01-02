@@ -246,7 +246,7 @@ class BetaVAE(BaseVAE):
             loss = recons_loss + self.gamma * kld_weight * (kld_loss - C).abs()
         elif self.loss_type == 'PID':  # PID controller for beta-VAE
             beta, _ = self.pid_controller.pid(self.exp_kld_loss, kld_loss.item())
-            loss = recons_loss + beta * kld_weight * kld_loss
+            loss = recons_loss + beta * kld_loss
         else:
             raise ValueError('Undefined loss type.')
 
