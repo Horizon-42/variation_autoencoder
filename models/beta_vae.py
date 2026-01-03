@@ -6,6 +6,7 @@ from .types_ import *
 from lpips import LPIPS
 from .resize_conv2d import ResizeConv2d
 from.PID import PIDControl
+from .cyclical_annealer import CyclicalAnnealer
 
 def tv_loss(img: Tensor) -> torch.Tensor:
     """
@@ -34,6 +35,11 @@ class BetaVAE(BaseVAE):
                  enable_perceptual_loss: bool = True,
                  lpips_weight: float = 0.5,
                  tvl_weight: float = 1e-3,
+
+                 max_steps: int = 100000,
+                 n_cycles: int = 5,
+                 ratio: float = 0.6,
+                 circular_mode: str = 'linear',
                  **kwargs) -> None:
         """
         Docstring for __init__
@@ -89,6 +95,13 @@ class BetaVAE(BaseVAE):
         # for PID controller
         self.exp_kld_loss = exp_kld_loss
         self.pid_controller = PIDControl()
+
+        # Cyclical Annealer for beta
+        self.annealer = CyclicalAnnealer(total_steps=max_steps,
+                                         n_cycles=n_cycles,
+                                         max_beta=beta,
+                                         ratio=ratio,
+                                         mode=circular_mode)
 
         modules = []
         if hidden_dims is None:
@@ -247,6 +260,9 @@ class BetaVAE(BaseVAE):
         elif self.loss_type == 'PID':  # PID controller for beta-VAE
             beta, _ = self.pid_controller.pid(self.exp_kld_loss, kld_loss.item())
             loss = recons_loss + beta * kld_loss
+        elif self.loss_type == 'Cyclical':
+            beta = self.annealer(self.num_iter)
+            loss = recons_loss + beta * kld_weight * kld_loss
         else:
             raise ValueError('Undefined loss type.')
 
