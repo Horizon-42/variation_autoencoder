@@ -1,5 +1,5 @@
 import torch
-from models import BaseVAE
+from .base import BaseVAE
 from torch import nn
 from torch.nn import functional as F
 from .types_ import *
@@ -206,7 +206,7 @@ class BetaTCVAE(BaseVAE):
         
         return {'loss': loss,
                 'Reconstruction_Loss':recons_loss,
-                'KLD':kld_loss,
+                'KLD_Loss':kld_loss,
                 'TC_Loss':tc_loss,
                 'MI_Loss':mi_loss}
 
