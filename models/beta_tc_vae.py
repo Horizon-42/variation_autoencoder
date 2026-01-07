@@ -3,7 +3,15 @@ from .base import BaseVAE
 from torch import nn
 from torch.nn import functional as F
 from .types_ import *
+from lpips import LPIPS
 import math
+
+
+def tv_loss(img: Tensor) -> torch.Tensor:
+    """Total variation loss to penalize high-frequency noise."""
+    w_variance = torch.sum(torch.pow(img[:, :, :, :-1] - img[:, :, :, 1:], 2))
+    h_variance = torch.sum(torch.pow(img[:, :, :-1, :] - img[:, :, 1:, :], 2))
+    return (w_variance + h_variance) / (img.size(0) * img.size(1) * img.size(2))
 
 
 class BetaTCVAE(BaseVAE):
@@ -17,8 +25,21 @@ class BetaTCVAE(BaseVAE):
                  alpha: float = 1.,
                  beta: float =  6.,
                  gamma: float = 1.,
+                 image_size: Tuple[int, int] = (64, 64),
+                 enable_perceptual_loss: bool = False,
+                 lpips_weight: float = 0.5,
+                 tvl_weight: float = 1e-3,
                  **kwargs) -> None:
         super(BetaTCVAE, self).__init__()
+
+        self.enable_perceptual_loss = enable_perceptual_loss
+        self.lpips_weight = lpips_weight
+        self.tvl_weight = tvl_weight
+        self.lpips_model = None
+        if self.enable_perceptual_loss:
+            self.lpips_model = LPIPS(net='vgg', verbose=False).eval()
+            for param in self.lpips_model.parameters():
+                param.requires_grad = False
 
         self.latent_dim = latent_dim
         self.anneal_steps = anneal_steps
@@ -30,28 +51,44 @@ class BetaTCVAE(BaseVAE):
         modules = []
         if hidden_dims is None:
             hidden_dims = [32, 32, 32, 32]
+        hidden_dims = list(hidden_dims)
+
+        if isinstance(image_size, int):
+            image_size = (image_size, image_size)
 
         # Build Encoder
+        cur_in_channels = in_channels
         for h_dim in hidden_dims:
             modules.append(
                 nn.Sequential(
-                    nn.Conv2d(in_channels, out_channels=h_dim,
+                    nn.Conv2d(cur_in_channels, out_channels=h_dim,
                               kernel_size= 4, stride= 2, padding  = 1),
                     nn.LeakyReLU())
             )
-            in_channels = h_dim
+            cur_in_channels = h_dim
 
         self.encoder = nn.Sequential(*modules)
 
-        self.fc = nn.Linear(hidden_dims[-1]*16, 256)
-        self.fc_mu = nn.Linear(256, latent_dim)
-        self.fc_var = nn.Linear(256, latent_dim)
+        # Infer encoder output shape and flat size dynamically (like BetaVAE)
+        input_height, input_width = image_size
+        was_training = self.training
+        self.eval()
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, in_channels, input_height, input_width)
+            encoder_output = self.encoder(dummy_input)
+            self.flat_size = encoder_output.view(1, -1).size(1)
+            self.encoder_output_shape = encoder_output.shape[1:]
+        if was_training:
+            self.train()
+
+        self.fc_mu = nn.Linear(self.flat_size, latent_dim)
+        self.fc_var = nn.Linear(self.flat_size, latent_dim)
 
 
         # Build Decoder
         modules = []
 
-        self.decoder_input = nn.Linear(latent_dim, 256 *  2)
+        self.decoder_input = nn.Linear(latent_dim, self.flat_size)
 
         hidden_dims.reverse()
 
@@ -91,7 +128,6 @@ class BetaTCVAE(BaseVAE):
         result = self.encoder(input)
 
         result = torch.flatten(result, start_dim=1)
-        result = self.fc(result)
         # Split the result into mu and var components
         # of the latent Gaussian distribution
         mu = self.fc_mu(result)
@@ -107,7 +143,7 @@ class BetaTCVAE(BaseVAE):
         :return: (Tensor) [B x C x H x W]
         """
         result = self.decoder_input(z)
-        result = result.view(-1, 32, 4, 4)
+        result = result.view(-1, *self.encoder_output_shape)
         result = self.decoder(result)
         result = self.final_layer(result)
         return result
@@ -160,7 +196,22 @@ class BetaTCVAE(BaseVAE):
 
         weight = 1 #kwargs['M_N']  # Account for the minibatch samples from the dataset
 
-        recons_loss =F.mse_loss(recons, input, reduction='sum')
+        recons_loss = F.mse_loss(recons, input, reduction='sum')
+
+        if self.enable_perceptual_loss:
+            tvl = tv_loss(recons)
+            recons_loss = recons_loss + (self.tvl_weight * tvl)
+
+            if self.lpips_model is None:
+                self.lpips_model = LPIPS(net='vgg', verbose=False).eval()
+                for param in self.lpips_model.parameters():
+                    param.requires_grad = False
+
+            if next(self.lpips_model.parameters()).device != input.device:
+                self.lpips_model = self.lpips_model.to(input.device)
+
+            perceptual_loss = self.lpips_model(recons, input).mean()
+            recons_loss = recons_loss + (self.lpips_weight * perceptual_loss)
 
         log_q_zx = self.log_density_gaussian(z, mu, log_var).sum(dim = 1)
 
