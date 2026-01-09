@@ -75,10 +75,85 @@ $$
 \mathcal{L}_{\text{recon}} = \mathcal{L}_{\text{MSE}} + \lambda_{\text{TV}}\,\mathcal{L}_{\text{TV}} + \lambda_{\text{LPIPS}}\,\mathcal{L}_{\text{LPIPS}}.
 $$
 
+#### What LPIPS measures (intuition)
+
+LPIPS (Learned Perceptual Image Patch Similarity) is a **feature-space** distance: instead of comparing pixels directly, it compares deep features extracted by a pretrained CNN (AlexNet/VGG/SqueezeNet). This tends to correlate better with human perception:
+
+- Small spatial shifts / texture changes that look similar to humans can have small LPIPS even when pixel MSE is large.
+- Conversely, pixel-wise “averaging” (common with pure MSE) can reduce MSE but still look perceptually wrong; LPIPS penalizes that.
+
+#### A common mathematical form
+
+Let $\phi_l(\cdot)$ be the activation tensor at layer $l$ of a fixed pretrained network.
+LPIPS normalizes channel vectors at each spatial location and then computes a weighted L2 difference:
+
+$$
+\mathcal{L}_{\text{LPIPS}}(x,\hat{x})
+= \sum_{l}\frac{1}{H_lW_l}\sum_{h,w}\left\lVert w_l \odot \big(\hat{\phi}_l(x)_{h,w} - \hat{\phi}_l(\hat{x})_{h,w}\big)\right\rVert_2^2.
+$$
+
+- $\hat{\phi}_l(\cdot)$ indicates per-location channel normalization.
+- $w_l$ are learned per-channel weights (implemented as a 1×1 conv in the LPIPS package).
+
+Because it is a squared norm (with fixed non-negative weights in a correct setup), LPIPS is expected to be **non-negative**.
+
+#### Why you still keep MSE
+
+LPIPS alone is not a likelihood; it is a perceptual metric. In practice, mixing MSE + LPIPS works well:
+
+- MSE anchors low-frequency structure and global color.
+- LPIPS encourages realistic local texture/detail.
+
+The combined form used in this repo is effectively:
+
+$$
+\mathcal{L}_{\text{recon}} = \underbrace{\lVert x-\hat{x}\rVert_2^2}_{\text{MSE}} + \lambda_{\text{LPIPS}}\,\underbrace{\mathcal{L}_{\text{LPIPS}}(x,\hat{x})}_{\text{perceptual}} + \lambda_{\text{TV}}\,\underbrace{\mathcal{L}_{\text{TV}}(\hat{x})}_{\text{smoothness}}.
+$$
+
 Notes that match this codebase:
 
 - LPIPS backbone is frozen (`requires_grad=False`) to prevent the optimizer from “cheating” by changing LPIPS weights.
 - LPIPS expects inputs in the range **[-1, 1]**. Since decoders here end with `tanh`, it’s usually best to normalize images to [-1, 1] as well.
+
+More repo-specific implementation details:
+
+- In `models/beta_vae.py`, LPIPS is created as `LPIPS(net='vgg', verbose=False).eval()` and moved to the same device as the input when needed.
+- Gradients are intended to flow **through** $\hat{x}$ (the decoder output) back into the VAE, but **not** into the LPIPS network.
+- In `models/beta_tc_vae.py`, LPIPS is only instantiated when `enable_perceptual_loss=True`.
+
+#### Common pitfalls (seen in this repo)
+
+1) **Input range mismatch**
+
+If your dataloader uses only `ToTensor()` then inputs are in **[0, 1]** while the decoder output is in **[-1, 1]** (because of `tanh`). This makes LPIPS and MSE comparisons inconsistent.
+
+Recommended transform when using `tanh` + LPIPS:
+
+```python
+transforms.Compose([
+	transforms.Resize((H, W)),
+	transforms.ToTensor(),
+	transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+])
+```
+
+2) **LPIPS becomes negative / model “cheats”**
+
+LPIPS should not be negative in a correct setup. If you see negative values, the usual causes are:
+
+- LPIPS parameters were accidentally trainable (optimizer updates $w_l$ and can flip signs), or
+- you inadvertently subtract LPIPS, or multiply it by a negative coefficient.
+
+This repo explicitly freezes LPIPS parameters to prevent this failure mode.
+
+3) **Weight scale and training dynamics**
+
+LPIPS has a different numeric scale than MSE. If `lpips_weight` is too large:
+
+- textures may be over-emphasized,
+- training can become unstable or produce “weird” high-frequency patterns (TV loss can help).
+
+In this repo’s experiments, `lpips_weight` is commonly in the rough range **0.1–1.5** (see results folder names like `LPIPS12` meaning 1.2).
 
 (There are extra LPIPS troubleshooting notes in `docs/LPIPS_Tips.md`.)
 
