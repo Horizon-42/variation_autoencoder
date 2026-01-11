@@ -1,7 +1,7 @@
-\# Variation Autoencoders
+# Variation Autoencoders
 
 This repo contains several VAE variants (mainly for CelebA face images) and a set of experiment folders under `results_*`.
-The model implementations in `models/` are based on AntixK/PyTorch-VAE, with additional loss options (Burgess capacity, PID, cyclical beta) and optional perceptual losses.
+The model implementations in `models/` are based on AntixK/PyTorch-VAE(https://github.com/AntixK/PyTorch-VAE.git), with additional loss options (Burgess capacity, PID, cyclical beta) and optional perceptual losses.
 
 ---
 
@@ -74,27 +74,95 @@ You can see these choices reflected in the experiment folders, e.g.:
 
 ## Training setup (Data, loss, hyperparameters)
 
+### Quick Reference Tables (Slide-Ready)
+
+#### Table 1: Training Configuration
+
+| Component | Setting | Notes |
+|-----------|---------|-------|
+| **Dataset** | CelebA (~160k train) | `scripts/download_celeba.py` |
+| **Preprocessing** | CenterCrop(178) → Resize → ToTensor → Normalize | |
+| **Normalization** | `mean=(0.5,0.5,0.5)`, `std=(0.5,0.5,0.5)` | Maps [0,1] → [-1,1] for `tanh` output |
+| **Optimizer** | Adam | |
+| **Learning rate** | 1e-3 (main) / 1e-4 (lightweight) | |
+| **LR Scheduler** | ReduceLROnPlateau | patience=5, mode='min' |
+| **Batch size** | 256 (64×64) / 64–128 (128×128) | Adjust for GPU memory |
+| **Early stopping** | patience=10 on val recon loss | Starts after epoch 10 |
+
+#### Table 2: Model Architecture
+
+| Image Size | Latent Dim | Hidden Dims | Encoder Output | Total Params |
+|------------|------------|-------------|----------------|--------------|
+| 64×64 | 128 | [32, 64, 128, 256, 512] | 512×4×4 | ~8M |
+| 64×64 | 256 | [32, 64, 128, 256, 512] | 512×4×4 | ~10M |
+| 128×128 | 256 | [32, 64, 128, 256, 512, 1024] | 1024×4×4 | ~42M |
+
+#### Table 3: Loss Function Variants (BetaVAE)
+
+| Loss Type | Formula | Key Params | Typical Values |
+|-----------|---------|------------|----------------|
+| **H** (Higgins) | $\mathcal{L}_{recon} + \beta \cdot \text{KLD}$ | `beta` | 0.01, 1, 5, 10 |
+| **B** (Burgess) | $\mathcal{L}_{recon} + \gamma \cdot \|\text{KLD} - C(t)\|$ | `gamma`, `max_capacity` | γ=10–30, C=100–400 |
+| **PID** | Adaptive β via PID controller | `exp_kld_loss` (target) | 10, 25 |
+| **Cyclical** | $\beta(t)$ periodic annealing | `max_beta`, `ratio`, `mode` | max=10, ratio=0.6, linear |
+
+#### Table 4: Beta-TC-VAE Parameters
+
+| Param | Role | Default | Typical Range |
+|-------|------|---------|---------------|
+| `alpha` | MI (Mutual Info) weight | 1 | 1 (usually fixed) |
+| `beta` | **TC (Total Correlation)** weight | 6 | 1–10 (↑ = more disentangled) |
+| `gamma` | DW-KL weight | 1 | 1 (usually fixed) |
+| `anneal_steps` | DW-KL warmup iterations | 200 | 100–500 |
+
+#### Table 5: Perceptual Loss Settings
+
+| Component | Weight Param | Typical Value | Effect |
+|-----------|--------------|---------------|--------|
+| MSE (L2) | — | always on | Base reconstruction |
+| LPIPS (VGG) | `lpips_weight` | 0.5–1.5 | Perceptual sharpness |
+| TV Loss | `tvl_weight` | 1e-4–1e-2 | Smoothness / anti-checkerboard |
+
+#### Table 6: Selected Experiment Configurations
+
+| Experiment | ImgSize | LatentDim | Loss | β/γ | Capacity | LPIPS | TV |
+|------------|---------|-----------|------|-----|----------|-------|-----|
+| Baseline H | 64 | 128 | H | β=1 | — | ✗ | ✗ |
+| Strong KL (H) | 64 | 256 | H | β=10 | — | ✗ | ✗ |
+| Burgess | 64 | 256 | B | γ=20 | 400 | ✗ | ✗ |
+| Burgess+Perc | 128 | 256 | B | γ=15 | 400 | 1.2 | 0.01 |
+| Cyclical | 64 | 128 | Cyc | max=10 | — | ✗ | ✗ |
+| Beta-TC-VAE | 64 | 128 | TC | β=6 | — | ✗ | ✗ |
+| Beta-TC-VAE (strong) | 64 | 128 | TC | β=10 | — | ✗ | ✗ |
+
+---
+
 ### Dataset
 
 CelebA is downloaded via torchvision:
 
 ```bash
-python download_celeba.py
+python scripts/download_celeba.py
 ```
 
 By default this places data under `./data/`.
 
 ### Preprocessing / normalization
 
-Minimum required preprocessing (used in `test_unaligned_images.py`):
+Minimum required preprocessing:
 
 - `Resize((image_size, image_size))`
 - `ToTensor()`
 
-Recommended for **`tanh` output + LPIPS**:
+Recommended for **`tanh` output + LPIPS** (always use this in practice):
 
 ```python
-transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))  # [0,1] -> [-1,1]
+transforms.Compose([
+    transforms.CenterCrop((178, 178)),    # Remove borders
+    transforms.Resize((H, W)),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),  # [0,1] → [-1,1]
+])
 ```
 
 ### Losses
@@ -107,13 +175,13 @@ The loss is computed in `models/beta_vae.py::loss_function` with:
 - Optional additions when `enable_perceptual_loss=True`:
 	- **TV loss**: penalizes high-frequency noise
 	- **LPIPS** (VGG backbone): perceptual similarity loss
-		- LPIPS parameters are frozen (`requires_grad=False`) to avoid optimization “cheating”.
+		- LPIPS parameters are frozen (`requires_grad=False`) to avoid optimization "cheating".
 
 KL term (per batch):
 
 $$\text{KLD} = \mathbb{E}\left[ -\tfrac{1}{2}\sum (1 + \log\sigma^2 - \mu^2 - \sigma^2) \right]$$
 
-`M_N` is the minibatch scaling factor, typically `M_N = 1 / len(dataset)`.
+`M_N` is the minibatch scaling factor: `M_N = batch_size / len(dataset)`.
 
 ### KL weighting / schedules (`loss_type`)
 
@@ -126,21 +194,6 @@ $$\text{KLD} = \mathbb{E}\left[ -\tfrac{1}{2}\sum (1 + \log\sigma^2 - \mu^2 - \s
 	- Capacity ramps up until `max_capacity`.
 - `PID`: PID controller adjusts an effective β to match a target KL.
 - `Cyclical`: cyclical annealing schedule for β.
-
-### Typical hyperparameters (from repo scripts)
-
-The lightweight training loop in `test_unaligned_images.py` uses:
-
-- `image_size = 64`
-- `latent_dim = 128`
-- `hidden_dims = [32, 64, 128, 256, 512]`
-- Optimizer: Adam
-	- `lr = 1e-4`
-- Example settings:
-	- `loss_type='H'`, `beta=1`
-	- `enable_perceptual_loss=False` (for that experiment)
-
-Many experiment directories also encode hyperparameters in their folder name (see next section).
 
 ---
 
