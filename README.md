@@ -1,6 +1,6 @@
 # Variation Autoencoders
 
-This repo contains several VAE variants (mainly for CelebA face images) and a set of experiment folders under `results_*`.
+This repo contains several VAE variants (mainly for CelebA face images) and a set of experiment folders under `results`.
 The model implementations in `models/` are based on AntixK/PyTorch-VAE(https://github.com/AntixK/PyTorch-VAE.git), with additional loss options (Burgess capacity, PID, cyclical beta) and optional perceptual losses.
 
 Them main **training pipeline** is `vae_on_celebs_train.ipynb`, and the **evaluation pipeline** is `vae_on_celebs_eval.ipynb`.
