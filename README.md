@@ -133,7 +133,7 @@ You can see these choices reflected in the experiment folders, e.g.:
 |------------|---------|-----------|------|-----|----------|-------|-----|
 | Baseline H | 64 | 256 | H | β=1 | — | — | — |
 | Baseline H | 64 | 128 | H | β=1 | — | yes | yes |
-| Weak KL (H) | 64 | 256 | H | β=0.001 | — | —**** | — |
+| Weak KL (H) | 64 | 256 | H | β=0.001 | — | — | — |
 | Strong KL (H) | 64 | 128 | H | β=5 | — | yes | yes |
 | Strong KL (H) | 64 | 128 | H | β=10 | — | — | — |
 | Burgess | 64 | 256 | B | γ=15 | 400 | — | — |
