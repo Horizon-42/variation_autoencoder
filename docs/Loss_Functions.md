@@ -191,7 +191,7 @@ Let
 ### 1) Higgins β-VAE (`loss_type='H'`)
 
 $$
-\mathcal{L} = \mathcal{L}_{\text{recon}} + \beta\,M_N\,\text{KLD}.
+\mathcal{L} = \mathcal{L}_{\text{recon}} + \beta\,\text{KLD}.
 $$
 
 Increasing $\beta$ pushes the posterior closer to the prior (more regularization), often improving factorization/disentanglement but hurting reconstruction.
@@ -201,7 +201,7 @@ Increasing $\beta$ pushes the posterior closer to the prior (more regularization
 This uses a target capacity $C(t)$ that increases with training steps until `max_capacity`:
 
 $$
-\mathcal{L} = \mathcal{L}_{\text{recon}} + \gamma\,M_N\,\left|\text{KLD} - C(t)\right|.
+\mathcal{L} = \mathcal{L}_{\text{recon}} + \gamma\,\left|\text{KLD} - C(t)\right|.
 $$
 
 Intuition:
@@ -239,11 +239,7 @@ where $\beta(t)$ periodically ramps from 0→max to encourage alternating phases
 
 ## Beta-TC-VAE (as implemented in `models/beta_tc_vae.py`)
 
-Beta-TC-VAE decomposes the KL part of the ELBO into three components:
-
-- Mutual information (MI): encourages information between $x$ and $z$ to be controlled
-- Total correlation (TC): encourages factorization of the aggregated posterior
-- Dimension-wise KL (DW-KL): matches each marginal $q(z_j)$ to the prior
+Beta-TC-VAE (Chen et al., 2018, "Isolating Sources of Disentanglement in VAEs") decomposes the KL part of the ELBO into three components and allows independent weighting of each. This is motivated by the observation that **Total Correlation (TC)** is the key term responsible for disentanglement.
 
 ### 1) Start from the standard VAE objective
 
@@ -256,23 +252,59 @@ $$
 Define the *aggregated posterior*:
 
 $$
-q(z) = \int q(z\mid x)\,q(x)\,dx.
+q(z) = \int q(z\mid x)\,q(x)\,dx \approx \frac{1}{N}\sum_{n=1}^{N} q(z\mid x^{(n)}).
 $$
 
 Then the KL can be decomposed (Chen et al., 2018) as:
 
 $$
 \mathbb{E}_{q(x)}\left[D_{KL}(q(z\mid x)\|p(z))\right]
-= I_q(x;z) + D_{KL}(q(z)\|\prod_j q(z_j)) + \sum_j D_{KL}(q(z_j)\|p(z_j)).
+= \underbrace{I_q(x;z)}_{\text{MI}} + \underbrace{D_{KL}(q(z)\|\prod_j q(z_j))}_{\text{TC}} + \underbrace{\sum_j D_{KL}(q(z_j)\|p(z_j))}_{\text{DW-KL}}.
 $$
 
-Where:
+### 2) Intuition behind each component
 
-- $I_q(x;z)$ is mutual information under $q$
-- $D_{KL}(q(z)\|\prod_j q(z_j))$ is **total correlation**
-- $\sum_j D_{KL}(q(z_j)\|p(z_j))$ is **dimension-wise KL**
+#### Mutual Information (MI): $I_q(x;z)$
 
-### 2) Beta-TC-VAE objective used here
+$$
+I_q(x;z) = \mathbb{E}_{q(x,z)}\left[\log \frac{q(z\mid x)}{q(z)}\right] = \mathbb{E}[\log q(z\mid x) - \log q(z)]
+$$
+
+- Measures how much information about $x$ is preserved in $z$.
+- Higher MI → $z$ encodes more details about $x$ → better reconstruction.
+- Lower MI → $z$ is more "compressed" / generic.
+- **Trade-off**: Penalizing MI too strongly can hurt reconstruction quality. Typically $\alpha=1$ (no extra penalty beyond standard VAE).
+
+#### Total Correlation (TC): $D_{KL}(q(z)\|\prod_j q(z_j))$
+
+$$
+\text{TC} = \mathbb{E}_{q(z)}\left[\log \frac{q(z)}{\prod_j q(z_j)}\right] = \mathbb{E}[\log q(z) - \sum_j \log q(z_j)]
+$$
+
+- Measures how much the latent dimensions are **statistically dependent** (correlated).
+- TC = 0 iff $q(z)$ factorizes, i.e. latent dimensions are independent.
+- **This is the key term for disentanglement**: penalizing TC encourages each $z_j$ to capture a different, independent factor of variation.
+- Setting $\beta > 1$ is the main lever for improving disentanglement.
+
+#### Dimension-wise KL (DW-KL): $\sum_j D_{KL}(q(z_j)\|p(z_j))$
+
+$$
+\text{DW-KL} = \sum_j \mathbb{E}_{q(z_j)}\left[\log \frac{q(z_j)}{p(z_j)}\right] = \mathbb{E}\left[\sum_j \log q(z_j) - \log p(z)\right]
+$$
+
+- Measures how much each marginal $q(z_j)$ deviates from the prior $p(z_j) = \mathcal{N}(0,1)$.
+- Encourages each latent dimension to have unit variance and zero mean **on average across the dataset**.
+- Unlike MI and TC, DW-KL does not directly affect disentanglement; it mainly regularizes the latent space geometry.
+
+#### Summary table
+
+| Term | What it penalizes | Effect of increasing weight |
+|------|-------------------|----------------------------|
+| MI ($\alpha$) | Information flow $x \to z$ | Less reconstruction detail |
+| TC ($\beta$) | Correlation between $z_j$'s | Better disentanglement, but may reduce capacity |
+| DW-KL ($\gamma$) | Deviation from $\mathcal{N}(0,1)$ marginals | More Gaussian-like latent space |
+
+### 3) Beta-TC-VAE objective used here
 
 The implementation follows the standard weighting scheme:
 
@@ -282,7 +314,7 @@ $$
 
 In this repo:
 
-- `alpha`, `beta`, `gamma` are constructor parameters.
+- `alpha`, `beta`, `gamma` are constructor parameters (defaults: $\alpha=1, \beta=6, \gamma=1$).
 - `anneal_rate` ramps the DW-KL term for the first `anneal_steps` iterations:
 
 $$
@@ -291,28 +323,135 @@ $$
 
 (The code divides `recons_loss` by batch size `B`.)
 
-### 3) How MI / TC / DW-KL are computed (high level)
+### 4) Minibatch estimation of MI / TC / DW-KL (detailed)
 
-The code estimates:
+The key challenge is estimating $\log q(z)$ and $\log \prod_j q(z_j)$, since the aggregated posterior involves an expectation over the entire dataset. The code uses **minibatch-weighted sampling** (a.k.a. stratified importance sampling).
 
-- $\log q(z\mid x)$ using the diagonal Gaussian density
-- $\log q(z)$ and $\log \prod_j q(z_j)$ via minibatch importance-weighted estimates (using `logsumexp` over a matrix of pairwise densities)
+#### Step 1: Compute $\log q(z\mid x)$
 
-Then:
-
-$$
-\text{MI} = \mathbb{E}[\log q(z\mid x) - \log q(z)],
-$$
+For a diagonal Gaussian $q(z\mid x) = \mathcal{N}(\mu, \operatorname{diag}(\sigma^2))$:
 
 $$
-\text{TC} = \mathbb{E}[\log q(z) - \log \prod_j q(z_j)],
+\log q(z\mid x) = \sum_{j=1}^{D} \log q(z_j\mid x) = \sum_{j=1}^{D} \left[ -\frac{1}{2}\log(2\pi) - \frac{1}{2}\log\sigma_j^2 - \frac{(z_j - \mu_j)^2}{2\sigma_j^2} \right]
 $$
 
+In code (`log_density_gaussian`):
+
+```python
+norm = -0.5 * (math.log(2 * math.pi) + logvar)
+log_density = norm - 0.5 * ((x - mu) ** 2 * torch.exp(-logvar))
+```
+
+#### Step 2: Build the pairwise log-density matrix
+
+To estimate $q(z)$, we use the fact that:
+
 $$
-\text{DW-KL} = \mathbb{E}[\log \prod_j q(z_j) - \log p(z)].
+q(z) = \mathbb{E}_{q(x)}[q(z\mid x)] \approx \frac{1}{N}\sum_{n=1}^{N} q(z\mid x^{(n)})
 $$
 
-This is why `models/beta_tc_vae.py` constructs `mat_log_q_z` with shape `[B, B, D]`, adds log importance weights, then uses `logsumexp` to get $\log q(z)$ and $\log \prod_j q(z_j)$.
+For a minibatch of $B$ samples, we compute a matrix of shape `[B, B, D]`:
+
+$$
+\texttt{mat\_log\_q\_z}[i, n, j] = \log q(z_j^{(i)} \mid x^{(n)})
+$$
+
+This measures the log-probability of the $j$-th latent dimension of sample $i$'s latent code under sample $n$'s encoder distribution.
+
+```python
+mat_log_q_z = self.log_density_gaussian(
+    z.view(batch_size, 1, latent_dim),      # [B, 1, D] - z samples
+    mu.view(1, batch_size, latent_dim),      # [1, B, D] - all encoder means
+    log_var.view(1, batch_size, latent_dim)  # [1, B, D] - all encoder variances
+)
+# Result shape: [B, B, D]
+```
+
+#### Step 3: Importance weights for unbiased estimation
+
+Naively averaging over the minibatch gives a biased estimate of $q(z)$. The code uses **stratified importance weights** to correct for this:
+
+$$
+\log q(z^{(i)}) \approx \log \sum_{n=1}^{B} w_{in} \cdot q(z^{(i)} \mid x^{(n)})
+$$
+
+The weights are designed so that:
+- Diagonal entries (where $i=n$, i.e. evaluating $q(z^{(i)} \mid x^{(i)})$) get weight $1/N$ (dataset size)
+- Off-diagonal entries get weight $(N-B+1)/(N \cdot (B-1))$
+
+This corrects for the fact that the diagonal entry (same sample) is always present in the minibatch, while off-diagonal entries are randomly sampled.
+
+```python
+dataset_size = (1 / kwargs['M_N']) * batch_size
+strat_weight = (dataset_size - batch_size + 1) / (dataset_size * (batch_size - 1))
+importance_weights = torch.Tensor(batch_size, batch_size).fill_(1 / (batch_size - 1))
+importance_weights.view(-1)[::batch_size] = 1 / dataset_size  # diagonal
+importance_weights.view(-1)[1::batch_size] = strat_weight
+importance_weights[batch_size - 2, 0] = strat_weight
+```
+
+#### Step 4: Compute $\log q(z)$ and $\log \prod_j q(z_j)$
+
+After adding log importance weights:
+
+```python
+mat_log_q_z += log_importance_weights.view(batch_size, batch_size, 1)
+```
+
+**For $\log q(z)$**: Sum over latent dimensions first, then logsumexp over samples:
+
+$$
+\log q(z^{(i)}) = \text{logsumexp}_n \left[ \sum_j \texttt{mat\_log\_q\_z}[i,n,j] \right]
+$$
+
+```python
+log_q_z = torch.logsumexp(mat_log_q_z.sum(2), dim=1)  # [B]
+```
+
+**For $\log \prod_j q(z_j)$**: Logsumexp over samples for each dimension, then sum:
+
+$$
+\log \prod_j q(z_j^{(i)}) = \sum_j \text{logsumexp}_n \left[ \texttt{mat\_log\_q\_z}[i,n,j] \right]
+$$
+
+```python
+log_prod_q_z = torch.logsumexp(mat_log_q_z, dim=1).sum(1)  # [B]
+```
+
+**Key insight**: The difference between these two is that:
+- $\log q(z)$ treats latent dimensions as **joint** (sum then logsumexp)
+- $\log \prod_j q(z_j)$ treats them as **independent** (logsumexp then sum)
+
+If dimensions are truly independent, these should be equal, and TC = 0.
+
+#### Step 5: Final loss terms
+
+```python
+mi_loss  = (log_q_zx - log_q_z).mean()        # MI
+tc_loss  = (log_q_z - log_prod_q_z).mean()    # TC
+kld_loss = (log_prod_q_z - log_p_z).mean()    # DW-KL
+```
+
+### 5) Comparison with Beta-VAE
+
+| Aspect | Beta-VAE | Beta-TC-VAE |
+|--------|----------|-------------|
+| KL decomposition | Single term | MI + TC + DW-KL |
+| Disentanglement control | $\beta$ scales entire KL | $\beta$ targets TC specifically |
+| Reconstruction quality | Often degraded at high $\beta$ | Better preserved (MI not over-penalized) |
+| Computational cost | Simpler | Requires $O(B^2 D)$ pairwise computations |
+
+### 6) Practical tips for Beta-TC-VAE
+
+1. **Start with $\alpha=1, \gamma=1$**: These defaults work well. Focus tuning on $\beta$.
+
+2. **Increase $\beta$ for disentanglement**: Values like $\beta \in [4, 10]$ are common. Higher $\beta$ → more disentangled but may lose some reconstruction quality.
+
+3. **Use annealing**: The `anneal_steps` parameter (default 200) gradually increases the DW-KL contribution, which helps stabilize early training.
+
+4. **Batch size matters**: Larger batches give better estimates of $q(z)$. Very small batches (e.g., $B < 16$) can lead to noisy MI/TC estimates.
+
+5. **M_N parameter**: This should be set to `batch_size / dataset_size` for correct importance weighting. Check your training loop passes this correctly.
 
 ---
 
