@@ -36,7 +36,7 @@ class BetaVAE(BaseVAE):
                  lpips_weight: float = 0.5,
                  tvl_weight: float = 1e-3,
 
-                 max_steps: int = 100000,
+                 total_steps: int = 100000,
                  n_cycles: int = 5,
                  ratio: float = 0.6,
                  circular_mode: str = 'linear',
@@ -75,15 +75,16 @@ class BetaVAE(BaseVAE):
         super(BetaVAE, self).__init__()
 
         self.enable_perceptual_loss = enable_perceptual_loss
-        # lpips model for perceptual loss
-        # self.lpips_model = LPIPS(net='alex', verbose=False).eval()
-        self.lpips_model = LPIPS(net='vgg', verbose=False).eval()
-        # set requires_grad to False
-        for param in self.lpips_model.parameters():
-            param.requires_grad = False
-        # lpips loss weight, intial 0.1 to 0.5
         self.lpips_weight = lpips_weight
         self.tvl_weight = tvl_weight
+        
+        # Only create LPIPS model when perceptual loss is enabled
+        # This avoids saving/loading LPIPS weights when not needed
+        self.lpips_model = None
+        if self.enable_perceptual_loss:
+            self.lpips_model = LPIPS(net='vgg', verbose=False).eval()
+            for param in self.lpips_model.parameters():
+                param.requires_grad = False
 
         self.latent_dim = latent_dim
         self.beta = beta
@@ -97,7 +98,7 @@ class BetaVAE(BaseVAE):
         self.pid_controller = PIDControl()
 
         # Cyclical Annealer for beta
-        self.annealer = CyclicalAnnealer(total_steps=max_steps,
+        self.annealer = CyclicalAnnealer(total_steps=total_steps,
                                          n_cycles=n_cycles,
                                          max_beta=beta,
                                          ratio=ratio,
@@ -236,9 +237,14 @@ class BetaVAE(BaseVAE):
             tvl = tv_loss(recons)
             recons_loss += self.tvl_weight * tvl  # TV loss weight can be adjusted
 
-            # 计算感知损失
+            # Lazy initialization of LPIPS model if needed
+            if self.lpips_model is None:
+                self.lpips_model = LPIPS(net='vgg', verbose=False).eval()
+                for param in self.lpips_model.parameters():
+                    param.requires_grad = False
+
             # 确保 self.lpips_model 和 input 在同一个 device 上
-            if self.lpips_model.parameters().__next__().device != input.device:
+            if next(self.lpips_model.parameters()).device != input.device:
                 self.lpips_model = self.lpips_model.to(input.device)
 
             perceptual_loss = self.lpips_model(recons, input)

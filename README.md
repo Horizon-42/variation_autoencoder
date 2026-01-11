@@ -132,9 +132,9 @@ You can see these choices reflected in the experiment folders, e.g.:
 | Experiment | ImgSize | LatentDim | Loss | β/γ | Capacity | LPIPS | TV |
 |------------|---------|-----------|------|-----|----------|-------|-----|
 | Baseline H | 64 | 128 | H | β=1 | — | ✗ | ✗ |
+| Very Weak KL (H) | 64 | 256 | H | β=0.001 | — | ✗ | ✗ |
 | Strong KL (H) | 64 | 256 | H | β=10 | — | ✗ | ✗ |
-| Burgess | 64 | 256 | B | γ=20 | 400 | ✗ | ✗ |
-| Burgess+Perc | 128 | 256 | B | γ=15 | 400 | 1.2 | 0.01 |
+| Burgess | 64 | 256 | B | γ=15 | 400 | ✗ | ✗ |
 | Cyclical | 64 | 128 | Cyc | max=10 | — | ✗ | ✗ |
 | Beta-TC-VAE | 64 | 128 | TC | β=6 | — | ✗ | ✗ |
 | Beta-TC-VAE (strong) | 64 | 128 | TC | β=10 | — | ✗ | ✗ |
