@@ -131,13 +131,16 @@ You can see these choices reflected in the experiment folders, e.g.:
 
 | Experiment | ImgSize | LatentDim | Loss | β/γ | Capacity | LPIPS | TV |
 |------------|---------|-----------|------|-----|----------|-------|-----|
-| Baseline H | 64 | 128 | H | β=1 | — | ✗ | ✗ |
-| Very Weak KL (H) | 64 | 256 | H | β=0.001 | — | ✗ | ✗ |
-| Strong KL (H) | 64 | 256 | H | β=10 | — | ✗ | ✗ |
-| Burgess | 64 | 256 | B | γ=15 | 400 | ✗ | ✗ |
-| Cyclical | 64 | 128 | Cyc | max=10 | — | ✗ | ✗ |
-| Beta-TC-VAE | 64 | 128 | TC | β=6 | — | ✗ | ✗ |
-| Beta-TC-VAE (strong) | 64 | 128 | TC | β=10 | — | ✗ | ✗ |
+| Baseline H | 64 | 256 | H | β=1 | — | — | — |
+| Baseline H | 64 | 128 | H | β=1 | — | yes | yes |
+| Weak KL (H) | 64 | 256 | H | β=0.001 | — | —**** | — |
+| Strong KL (H) | 64 | 128 | H | β=5 | — | yes | yes |
+| Strong KL (H) | 64 | 128 | H | β=10 | — | — | — |
+| Burgess | 64 | 256 | B | γ=15 | 400 | — | — |
+| Cyclical | 64 | 128 | Cyc | max=4 | — | — | — |
+| Beta-TC-VAE | 64 | 128 | TC | β=1 | — | — | — |
+| Beta-TC-VAE | 64 | 128 | TC | β=5 | — | — | — |
+| Beta-TC-VAE (strong) | 64 | 128 | TC | β=10 | — | — | — |
 
 ---
 
