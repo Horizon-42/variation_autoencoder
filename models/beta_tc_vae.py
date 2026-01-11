@@ -62,7 +62,8 @@ class BetaTCVAE(BaseVAE):
             modules.append(
                 nn.Sequential(
                     nn.Conv2d(cur_in_channels, out_channels=h_dim,
-                              kernel_size= 4, stride= 2, padding  = 1),
+                              kernel_size=4, stride=2, padding=1),
+                    nn.BatchNorm2d(h_dim),
                     nn.LeakyReLU())
             )
             cur_in_channels = h_dim
@@ -98,9 +99,10 @@ class BetaTCVAE(BaseVAE):
                     nn.ConvTranspose2d(hidden_dims[i],
                                        hidden_dims[i + 1],
                                        kernel_size=3,
-                                       stride = 2,
+                                       stride=2,
                                        padding=1,
                                        output_padding=1),
+                    nn.BatchNorm2d(hidden_dims[i + 1]),
                     nn.LeakyReLU())
             )
 
@@ -113,9 +115,10 @@ class BetaTCVAE(BaseVAE):
                                                stride=2,
                                                padding=1,
                                                output_padding=1),
+                            nn.BatchNorm2d(hidden_dims[-1]),
                             nn.LeakyReLU(),
-                            nn.Conv2d(hidden_dims[-1], out_channels= 3,
-                                      kernel_size= 3, padding= 1),
+                            nn.Conv2d(hidden_dims[-1], out_channels=3,
+                                      kernel_size=3, padding=1),
                             nn.Tanh())
 
     def encode(self, input: Tensor) -> List[Tensor]:
@@ -156,6 +159,9 @@ class BetaTCVAE(BaseVAE):
         :param logvar: (Tensor) Standard deviation of the latent Gaussian [B x D]
         :return: (Tensor) [B x D]
         """
+        # Clamp log_var to prevent numerical instability
+        # log_var in [-20, 20] corresponds to std in [~1e-4, ~22000]
+        logvar = torch.clamp(logvar, min=-20, max=20)
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return eps * std + mu
@@ -168,11 +174,13 @@ class BetaTCVAE(BaseVAE):
     def log_density_gaussian(self, x: Tensor, mu: Tensor, logvar: Tensor):
         """
         Computes the log pdf of the Gaussian with parameters mu and logvar at x
-        :param x: (Tensor) Point at whichGaussian PDF is to be evaluated
+        :param x: (Tensor) Point at which Gaussian PDF is to be evaluated
         :param mu: (Tensor) Mean of the Gaussian distribution
         :param logvar: (Tensor) Log variance of the Gaussian distribution
         :return:
         """
+        # Clamp logvar to prevent numerical instability (exp overflow/underflow)
+        logvar = torch.clamp(logvar, min=-20, max=20)
         norm = - 0.5 * (math.log(2 * math.pi) + logvar)
         log_density = norm - 0.5 * ((x - mu) ** 2 * torch.exp(-logvar))
         return log_density
