@@ -1,4 +1,4 @@
-# Variation Autoencoders
+# Variation Autoencoders (Practical Part, by Dongxu Liu)
 
 This repo contains several VAE variants (mainly for CelebA face images) and a set of experiment folders under `results`.
 The model implementations in `models/` are based on AntixK/PyTorch-VAE(https://github.com/AntixK/PyTorch-VAE.git), with additional loss options (Burgess capacity, PID, cyclical beta) and optional perceptual losses.
